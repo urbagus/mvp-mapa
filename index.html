@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mapa MVP</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; width: 100%; }
+    .leaflet-control-layers { max-height: 60vh; overflow: auto; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    // 1) Basemaps con estética "dashboard"
+    const basePositron = L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+      { maxZoom: 20, attribution: '&copy; OpenStreetMap &copy; CARTO' }
+    );
+
+    const baseDark = L.tileLayer(
+      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      { maxZoom: 20, attribution: '&copy; OpenStreetMap &copy; CARTO' }
+    );
+
+    // 2) Mapa (ajustá centro/zoom si querés)
+    const map = L.map("map", { layers: [basePositron] }).setView([-32.95, -60.66], 12);
+
+    // 3) Helpers para estilos simples (MVP)
+    function styleDefault() {
+      return { weight: 1, opacity: 0.9, fillOpacity: 0.35 };
+    }
+
+    // 4) Capas GeoJSON (cambiá nombres de archivo)
+    const overlays = {};
+
+    async function addGeoJsonLayer(name, url, styleFn) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`No pude cargar ${url}`);
+      const data = await res.json();
+
+      const layer = L.geoJSON(data, {
+        style: styleFn || styleDefault,
+        onEachFeature: (feature, l) => {
+          // Popup básico: muestra propiedades si existen
+          const props = feature && feature.properties ? feature.properties : {};
+          const keys = Object.keys(props);
+          if (keys.length) {
+            const html = keys.slice(0, 12).map(k => `<b>${k}</b>: ${props[k]}`).join("<br/>");
+            l.bindPopup(html);
+          }
+        }
+      }).addTo(map);
+
+      overlays[name] = layer;
+
+      // Ajusta el mapa a la primera capa que cargue
+      if (!window.__fitDone) {
+        try { map.fitBounds(layer.getBounds(), { padding: [20, 20] }); } catch(e) {}
+        window.__fitDone = true;
+      }
+
+      return layer;
+    }
+
+    // 5) Cargar capas (MVP: 1 o 2)
+    Promise.all([
+      addGeoJsonLayer("Capa 1", "./data/capa1.geojson"),
+      // addGeoJsonLayer("Capa 2", "./data/capa2.geojson"),
+    ]).then(() => {
+      // 6) Control de capas
+      const baseMaps = { "Claro": basePositron, "Oscuro": baseDark };
+      L.control.layers(baseMaps, overlays, { collapsed: false }).addTo(map);
+    }).catch(err => {
+      console.error(err);
+      alert(err.message);
+    });
+  </script>
+</body>
+</html>
