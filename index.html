@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MVP Mapa - Accesibilidad</title>
+  <title>MVP Mapa - Accesibilidad + Población</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
@@ -12,7 +12,6 @@
     #map { height: 100vh; width: 100vw; }
     .leaflet-control-layers { max-height: 60vh; overflow: auto; }
 
-    /* Leyenda simple */
     .legend {
       background: white;
       padding: 10px 12px;
@@ -33,7 +32,24 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <script>
+    // =========================
+    // CONFIG (si algo no matchea, es acá)
+    // =========================
+    const ACCESS_URL = "./data/hex_index_access.geojson";
+    const POP_URL    = "./data/hex_index_pop.geojson";
+
+    const JOIN_KEY   = "hex_id";
+    const ACC_FIELD  = "acc_index";
+    const POP_FIELD  = "pop_hex"; // <-- si tu campo se llama distinto, cambialo acá
+
+    // Estética del efecto población → intensidad
+    const NEUTRAL = "#f3f3f3";  // con baja pob, el color se mezcla hacia este gris
+    const BASE_OPACITY = 0.90; // opacidad máxima
+    const GAMMA = 1.25;        // >1: medios más lavados | <1: medios más marcados
+
+    // =========================
     // Basemaps
+    // =========================
     const baseLight = L.tileLayer(
       "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
       { maxZoom: 20, attribution: "&copy; OpenStreetMap &copy; CARTO" }
@@ -44,17 +60,37 @@
       { maxZoom: 20, attribution: "&copy; OpenStreetMap &copy; CARTO" }
     );
 
-    // Mapa (Canvas ayuda si hay muchos hex)
     const map = L.map("map", { layers: [baseLight], preferCanvas: true })
       .setView([-32.95, -60.66], 12);
 
-    // Palette tipo QGIS (RdYlGn, 10 clases)
-    const colors = [
-      "#a50026", "#d73027", "#f46d43", "#fdae61", "#fee08b",
-      "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"
-    ];
+    // =========================
+    // Utilidades
+    // =========================
+    function lerp(a, b, t) { return a + (b - a) * t; }
 
-    // Cuantiles (10 clases)
+    function hexToRgb(hex) {
+      const h = hex.replace("#", "");
+      return {
+        r: parseInt(h.slice(0,2), 16),
+        g: parseInt(h.slice(2,4), 16),
+        b: parseInt(h.slice(4,6), 16)
+      };
+    }
+
+    function rgbToCss({r,g,b}) {
+      return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+    }
+
+    function mixHex(c1, c2, t) {
+      const a = hexToRgb(c1);
+      const b = hexToRgb(c2);
+      return rgbToCss({
+        r: lerp(a.r, b.r, t),
+        g: lerp(a.g, b.g, t),
+        b: lerp(a.b, b.b, t),
+      });
+    }
+
     function quantileBreaks(values, k) {
       const v = values.slice().sort((a,b) => a-b);
       const breaks = [];
@@ -62,11 +98,10 @@
         const idx = Math.floor((i * v.length) / k);
         breaks.push(v[Math.min(idx, v.length - 1)]);
       }
-      return breaks; // length k-1
+      return breaks;
     }
 
     function classIndex(x, breaks) {
-      // devuelve 0..k-1
       for (let i = 0; i < breaks.length; i++) {
         if (x <= breaks[i]) return i;
       }
@@ -75,22 +110,28 @@
 
     function formatNum(n) {
       if (n == null || Number.isNaN(n)) return "—";
-      // 3 decimales como en tu QGIS aprox
       return (Math.round(n * 1000) / 1000).toString();
     }
 
-    // Leyenda
+    // Palette tipo QGIS (RdYlGn, 10 clases)
+    const colors = [
+      "#a50026", "#d73027", "#f46d43", "#fdae61", "#fee08b",
+      "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"
+    ];
+
+    // Leyenda acc_index cuantiles
     function addLegend(breaks) {
       const legend = L.control({ position: "bottomright" });
       legend.onAdd = function() {
         const div = L.DomUtil.create("div", "legend");
-        div.innerHTML = `<div class="title">acc_index (cuantiles)</div>`;
+        div.innerHTML = `<div class="title">${ACC_FIELD} (cuantiles) + intensidad por población</div>`;
         let prev = null;
 
         for (let i = 0; i < colors.length; i++) {
           const to = (i < breaks.length) ? breaks[i] : null;
-          const fromTxt = (prev == null) ? `≤ ${formatNum(to)}` : `${formatNum(prev)} – ${formatNum(to)}`;
-          const label = (to == null) ? `> ${formatNum(prev)}` : fromTxt;
+          const label = (to == null)
+            ? `> ${formatNum(prev)}`
+            : (prev == null ? `≤ ${formatNum(to)}` : `${formatNum(prev)} – ${formatNum(to)}`);
 
           div.innerHTML += `
             <div class="row">
@@ -100,61 +141,110 @@
           prev = to;
         }
 
-        div.innerHTML += `<div class="muted">10 clases (como QGIS)</div>`;
+        div.innerHTML += `<div class="muted">10 clases (como QGIS). Población modula saturación/opacidad.</div>`;
         return div;
       };
       legend.addTo(map);
       return legend;
     }
 
-    // Cargar GeoJSON y estilizar por cuantiles
+    // =========================
+    // Carga y render
+    // =========================
     const overlays = {};
 
-    fetch("./data/hex_index_access.geojson")
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status} cargando GeoJSON`);
-        return r.json();
-      })
-      .then(data => {
-        // extraer valores acc_index
-        const vals = [];
-        for (const f of data.features || []) {
-          const v = Number(f?.properties?.acc_index);
-          if (!Number.isNaN(v) && v != null) vals.push(v);
+    Promise.all([
+      fetch(ACCESS_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${ACCESS_URL}`); return r.json(); }),
+      fetch(POP_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${POP_URL}`); return r.json(); }),
+    ])
+    .then(([accData, popData]) => {
+
+      // 1) Indexar población por hex_id
+      const popById = new Map();
+      const popVals = [];
+
+      for (const f of popData.features || []) {
+        const id = f?.properties?.[JOIN_KEY];
+        const p  = Number(f?.properties?.[POP_FIELD]);
+        if (id == null) continue;
+
+        // guardamos aunque sea 0
+        if (!Number.isNaN(p) && p != null) {
+          popById.set(String(id), p);
+          popVals.push(p);
         }
-        if (!vals.length) throw new Error("No encontré valores numéricos en properties.acc_index");
+      }
 
-        const breaks = quantileBreaks(vals, 10);
+      if (!popVals.length) {
+        throw new Error(`No encontré población numérica en properties.${POP_FIELD} dentro de ${POP_URL}`);
+      }
 
-        function style(feature) {
-          const v = Number(feature?.properties?.acc_index);
-          if (Number.isNaN(v) || v == null) {
-            return { stroke: false, fillOpacity: 0.2, fillColor: "#cccccc" };
-          }
-          const idx = classIndex(v, breaks);
-          return {
-            stroke: false,       // esto saca esas líneas/contornos raros
-            fillOpacity: 0.85,
-            fillColor: colors[idx]
-          };
+      // 2) Cuantiles de acc_index (como QGIS)
+      const accVals = [];
+      for (const f of accData.features || []) {
+        const v = Number(f?.properties?.[ACC_FIELD]);
+        if (!Number.isNaN(v) && v != null) accVals.push(v);
+      }
+      if (!accVals.length) {
+        throw new Error(`No encontré valores numéricos en properties.${ACC_FIELD} dentro de ${ACCESS_URL}`);
+      }
+
+      const accBreaks = quantileBreaks(accVals, 10);
+
+      // 3) Escala población -> t (0..1) usando p10..p90 + log
+      popVals.sort((a,b)=>a-b);
+      const p10 = popVals[Math.floor(popVals.length * 0.10)];
+      const p90 = popVals[Math.floor(popVals.length * 0.90)];
+
+      function popToT(p) {
+        if (p == null || Number.isNaN(p)) return 0;
+
+        const lp  = Math.log1p(p);
+        const l10 = Math.log1p(p10);
+        const l90 = Math.log1p(p90);
+
+        let t = (lp - l10) / (l90 - l10);
+        t = Math.max(0, Math.min(1, t));
+
+        return Math.pow(t, GAMMA);
+      }
+
+      // 4) Estilo combinado
+      function styleCombined(feature) {
+        const id  = String(feature?.properties?.[JOIN_KEY] ?? "");
+        const acc = Number(feature?.properties?.[ACC_FIELD]);
+        const pop = popById.get(id);
+
+        let baseColor = "#cccccc";
+        if (!Number.isNaN(acc) && acc != null) {
+          const idx = classIndex(acc, accBreaks);
+          baseColor = colors[idx];
         }
 
-        const hexLayer = L.geoJSON(data, { style }).addTo(map);
-        overlays["Accesibilidad (hex)"] = hexLayer;
+        const t = popToT(pop);
 
-        try { map.fitBounds(hexLayer.getBounds(), { padding: [20, 20] }); } catch(e) {}
+        return {
+          stroke: false, // sin contornos (hex limpio)
+          fillColor: mixHex(NEUTRAL, baseColor, t),
+          fillOpacity: BASE_OPACITY * (0.10 + 0.90 * t) // baja pob casi invisible, alta pob full
+        };
+      }
 
-        // Control capas
-        const baseMaps = { "Claro": baseLight, "Oscuro": baseDark };
-        L.control.layers(baseMaps, overlays, { collapsed: false }).addTo(map);
+      const layer = L.geoJSON(accData, { style: styleCombined }).addTo(map);
+      overlays["Accesibilidad (modulada por población)"] = layer;
 
-        // Leyenda
-        addLegend(breaks);
-      })
-      .catch(err => {
-        console.error(err);
-        alert("Error: " + err.message);
-      });
+      try { map.fitBounds(layer.getBounds(), { padding: [20, 20] }); } catch(e) {}
+
+      // Controles
+      const baseMaps = { "Claro": baseLight, "Oscuro": baseDark };
+      L.control.layers(baseMaps, overlays, { collapsed: false }).addTo(map);
+
+      addLegend(accBreaks);
+    })
+    .catch(err => {
+      console.error(err);
+      alert("Error: " + err.message);
+    });
   </script>
 </body>
 </html>
