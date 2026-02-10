@@ -8,8 +8,42 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
   <style>
-    html, body { height: 100%; margin: 0; }
-    #map { height: 100vh; width: 100vw; }
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+// rojo -> amarillo -> verde continuo
+function getColor(v) {
+  if (v == null) return "#ccc";
+
+  const min = 0;
+  const max = 9.5; // ajustable
+  const t = Math.max(0, Math.min(1, (v - min) / (max - min)));
+
+  // gradiente rojo -> verde pasando por amarillo
+  const r = Math.round(lerp(220, 34, t));
+  const g = Math.round(lerp(50, 139, t));
+  const b = Math.round(lerp(47, 34, t));
+
+  return `rgb(${r},${g},${b})`;
+}
+
+function style(feature) {
+  const v = feature.properties.acc_index;
+  return {
+    weight: 0,
+    fillOpacity: 0.85,
+    fillColor: getColor(v)
+  };
+}
+
+fetch("./data/hex_index_access.geojson")
+  .then(r => r.json())
+  .then(data => {
+    const layer = L.geoJSON(data, { style }).addTo(map);
+    map.fitBounds(layer.getBounds(), { padding: [20, 20] });
+  });
+
   </style>
 </head>
 <body>
@@ -44,3 +78,4 @@
   </script>
 </body>
 </html>
+
