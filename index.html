@@ -5,17 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>MVP Mapa - Accesibilidad</title>
 
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-  />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
   <style>
     html, body { height: 100%; margin: 0; }
     #map { height: 100vh; width: 100vw; }
-
-    /* opcional: la caja de layers un poco más usable */
     .leaflet-control-layers { max-height: 60vh; overflow: auto; }
+
+    /* Leyenda simple */
+    .legend {
+      background: white;
+      padding: 10px 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.15);
+      font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .legend .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .legend .swatch { width: 14px; height: 14px; border-radius: 3px; }
+    .legend .title { font-weight: 600; margin-bottom: 6px; }
+    .legend .muted { color: #666; font-size: 11px; margin-top: 6px; }
   </style>
 </head>
 
@@ -25,7 +33,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <script>
-    // --- Basemaps (estética dashboard)
+    // Basemaps
     const baseLight = L.tileLayer(
       "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
       { maxZoom: 20, attribution: "&copy; OpenStreetMap &copy; CARTO" }
@@ -36,42 +44,70 @@
       { maxZoom: 20, attribution: "&copy; OpenStreetMap &copy; CARTO" }
     );
 
-    // --- Mapa
-    const map = L.map("map", { layers: [baseLight] })
+    // Mapa (Canvas ayuda si hay muchos hex)
+    const map = L.map("map", { layers: [baseLight], preferCanvas: true })
       .setView([-32.95, -60.66], 12);
 
-    // --- Color rojo -> verde según acc_index (0 a ~9.5)
-    function lerp(a, b, t) {
-      return a + (b - a) * t;
+    // Palette tipo QGIS (RdYlGn, 10 clases)
+    const colors = [
+      "#a50026", "#d73027", "#f46d43", "#fdae61", "#fee08b",
+      "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"
+    ];
+
+    // Cuantiles (10 clases)
+    function quantileBreaks(values, k) {
+      const v = values.slice().sort((a,b) => a-b);
+      const breaks = [];
+      for (let i = 1; i < k; i++) {
+        const idx = Math.floor((i * v.length) / k);
+        breaks.push(v[Math.min(idx, v.length - 1)]);
+      }
+      return breaks; // length k-1
     }
 
-    function getColor(v) {
-      if (v == null || Number.isNaN(v)) return "#cccccc";
-
-      const min = 0;
-      const max = 9.5; // si querés lo ajustamos según tu dataset real
-      const t = Math.max(0, Math.min(1, (v - min) / (max - min)));
-
-      // gradiente rojo -> verde (suave)
-      const r = Math.round(lerp(220, 34, t));
-      const g = Math.round(lerp(50, 139, t));
-      const b = Math.round(lerp(47, 34, t));
-
-      return `rgb(${r},${g},${b})`;
+    function classIndex(x, breaks) {
+      // devuelve 0..k-1
+      for (let i = 0; i < breaks.length; i++) {
+        if (x <= breaks[i]) return i;
+      }
+      return breaks.length;
     }
 
-    function style(feature) {
-      const vRaw = feature?.properties?.acc_index;
-      const v = (vRaw === null || vRaw === undefined) ? null : Number(vRaw);
+    function formatNum(n) {
+      if (n == null || Number.isNaN(n)) return "—";
+      // 3 decimales como en tu QGIS aprox
+      return (Math.round(n * 1000) / 1000).toString();
+    }
 
-      return {
-        weight: 0,          // sin borde (más limpio para hex)
-        fillOpacity: 0.85,
-        fillColor: getColor(v)
+    // Leyenda
+    function addLegend(breaks) {
+      const legend = L.control({ position: "bottomright" });
+      legend.onAdd = function() {
+        const div = L.DomUtil.create("div", "legend");
+        div.innerHTML = `<div class="title">acc_index (cuantiles)</div>`;
+        let prev = null;
+
+        for (let i = 0; i < colors.length; i++) {
+          const to = (i < breaks.length) ? breaks[i] : null;
+          const fromTxt = (prev == null) ? `≤ ${formatNum(to)}` : `${formatNum(prev)} – ${formatNum(to)}`;
+          const label = (to == null) ? `> ${formatNum(prev)}` : fromTxt;
+
+          div.innerHTML += `
+            <div class="row">
+              <span class="swatch" style="background:${colors[i]}"></span>
+              <span>${label}</span>
+            </div>`;
+          prev = to;
+        }
+
+        div.innerHTML += `<div class="muted">10 clases (como QGIS)</div>`;
+        return div;
       };
+      legend.addTo(map);
+      return legend;
     }
 
-    // --- Cargar GeoJSON
+    // Cargar GeoJSON y estilizar por cuantiles
     const overlays = {};
 
     fetch("./data/hex_index_access.geojson")
@@ -80,21 +116,44 @@
         return r.json();
       })
       .then(data => {
+        // extraer valores acc_index
+        const vals = [];
+        for (const f of data.features || []) {
+          const v = Number(f?.properties?.acc_index);
+          if (!Number.isNaN(v) && v != null) vals.push(v);
+        }
+        if (!vals.length) throw new Error("No encontré valores numéricos en properties.acc_index");
+
+        const breaks = quantileBreaks(vals, 10);
+
+        function style(feature) {
+          const v = Number(feature?.properties?.acc_index);
+          if (Number.isNaN(v) || v == null) {
+            return { stroke: false, fillOpacity: 0.2, fillColor: "#cccccc" };
+          }
+          const idx = classIndex(v, breaks);
+          return {
+            stroke: false,       // esto saca esas líneas/contornos raros
+            fillOpacity: 0.85,
+            fillColor: colors[idx]
+          };
+        }
+
         const hexLayer = L.geoJSON(data, { style }).addTo(map);
         overlays["Accesibilidad (hex)"] = hexLayer;
 
-        // encuadrar
-        try {
-          map.fitBounds(hexLayer.getBounds(), { padding: [20, 20] });
-        } catch (e) {}
+        try { map.fitBounds(hexLayer.getBounds(), { padding: [20, 20] }); } catch(e) {}
 
-        // control de capas (base + overlay)
+        // Control capas
         const baseMaps = { "Claro": baseLight, "Oscuro": baseDark };
         L.control.layers(baseMaps, overlays, { collapsed: false }).addTo(map);
+
+        // Leyenda
+        addLegend(breaks);
       })
       .catch(err => {
         console.error(err);
-        alert("No pude cargar el GeoJSON. Mirá la consola (F12). " + err.message);
+        alert("Error: " + err.message);
       });
   </script>
 </body>
