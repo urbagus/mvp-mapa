@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MVP Mapa - Accesibilidad + Población</title>
+  <title>MVP Mapa - Accesibilidad modulada por población</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
@@ -33,19 +33,19 @@
 
   <script>
     // =========================
-    // CONFIG (si algo no matchea, es acá)
+    // CONFIG
     // =========================
     const ACCESS_URL = "./data/hex_index_access.geojson";
     const POP_URL    = "./data/hex_index_pop.geojson";
 
-    const JOIN_KEY   = "hex_id";
-    const ACC_FIELD  = "acc_index";
-    const POP_FIELD  = "pop_hex"; // <-- si tu campo se llama distinto, cambialo acá
+    const JOIN_KEY  = "id";        // <-- la opción más fácil: ambos tienen "id"
+    const ACC_FIELD = "acc_index";
+    const POP_FIELD = "pop_hex";
 
-    // Estética del efecto población → intensidad
-    const NEUTRAL = "#f3f3f3";  // con baja pob, el color se mezcla hacia este gris
-    const BASE_OPACITY = 0.90; // opacidad máxima
-    const GAMMA = 1.25;        // >1: medios más lavados | <1: medios más marcados
+    // Intensidad por población
+    const NEUTRAL = "#f3f3f3";
+    const BASE_OPACITY = 0.90;
+    const GAMMA = 1.25; // >1: medios más lavados | <1: medios más marcados
 
     // =========================
     // Basemaps
@@ -113,7 +113,19 @@
       return (Math.round(n * 1000) / 1000).toString();
     }
 
-    // Palette tipo QGIS (RdYlGn, 10 clases)
+    function toNumber(v) {
+      if (v == null) return NaN;
+      if (typeof v === "number") return v;
+      // por si viene "1.234" o "1,234" o "1234,56"
+      const s = String(v).trim().replace(/\s/g, "");
+      // si tiene coma y no tiene punto, asumimos decimal con coma
+      if (s.includes(",") && !s.includes(".")) return Number(s.replace(",", "."));
+      // si tiene ambos, asumimos separador miles con punto y decimal coma -> "1.234,56"
+      if (s.includes(",") && s.includes(".")) return Number(s.replace(/\./g, "").replace(",", "."));
+      return Number(s);
+    }
+
+    // Palette RdYlGn 10 clases
     const colors = [
       "#a50026", "#d73027", "#f46d43", "#fdae61", "#fee08b",
       "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"
@@ -124,7 +136,7 @@
       const legend = L.control({ position: "bottomright" });
       legend.onAdd = function() {
         const div = L.DomUtil.create("div", "legend");
-        div.innerHTML = `<div class="title">${ACC_FIELD} (cuantiles) + intensidad por población</div>`;
+        div.innerHTML = `<div class="title">${ACC_FIELD} (cuantiles) + intensidad por ${POP_FIELD}</div>`;
         let prev = null;
 
         for (let i = 0; i < colors.length; i++) {
@@ -159,17 +171,16 @@
     ])
     .then(([accData, popData]) => {
 
-      // 1) Indexar población por hex_id
+      // 1) Indexar población por "id"
       const popById = new Map();
       const popVals = [];
 
       for (const f of popData.features || []) {
         const id = f?.properties?.[JOIN_KEY];
-        const p  = Number(f?.properties?.[POP_FIELD]);
+        const p  = toNumber(f?.properties?.[POP_FIELD]);
         if (id == null) continue;
 
-        // guardamos aunque sea 0
-        if (!Number.isNaN(p) && p != null) {
+        if (!Number.isNaN(p)) {
           popById.set(String(id), p);
           popVals.push(p);
         }
@@ -179,11 +190,11 @@
         throw new Error(`No encontré población numérica en properties.${POP_FIELD} dentro de ${POP_URL}`);
       }
 
-      // 2) Cuantiles de acc_index (como QGIS)
+      // 2) Cuantiles de acc_index
       const accVals = [];
       for (const f of accData.features || []) {
-        const v = Number(f?.properties?.[ACC_FIELD]);
-        if (!Number.isNaN(v) && v != null) accVals.push(v);
+        const v = toNumber(f?.properties?.[ACC_FIELD]);
+        if (!Number.isNaN(v)) accVals.push(v);
       }
       if (!accVals.length) {
         throw new Error(`No encontré valores numéricos en properties.${ACC_FIELD} dentro de ${ACCESS_URL}`);
@@ -191,7 +202,7 @@
 
       const accBreaks = quantileBreaks(accVals, 10);
 
-      // 3) Escala población -> t (0..1) usando p10..p90 + log
+      // 3) p10..p90 población + log para factor t
       popVals.sort((a,b)=>a-b);
       const p10 = popVals[Math.floor(popVals.length * 0.10)];
       const p90 = popVals[Math.floor(popVals.length * 0.90)];
@@ -209,14 +220,14 @@
         return Math.pow(t, GAMMA);
       }
 
-      // 4) Estilo combinado
+      // 4) Estilo combinado (acc color * población intensidad)
       function styleCombined(feature) {
         const id  = String(feature?.properties?.[JOIN_KEY] ?? "");
-        const acc = Number(feature?.properties?.[ACC_FIELD]);
+        const acc = toNumber(feature?.properties?.[ACC_FIELD]);
         const pop = popById.get(id);
 
         let baseColor = "#cccccc";
-        if (!Number.isNaN(acc) && acc != null) {
+        if (!Number.isNaN(acc)) {
           const idx = classIndex(acc, accBreaks);
           baseColor = colors[idx];
         }
@@ -224,9 +235,9 @@
         const t = popToT(pop);
 
         return {
-          stroke: false, // sin contornos (hex limpio)
+          stroke: false,
           fillColor: mixHex(NEUTRAL, baseColor, t),
-          fillOpacity: BASE_OPACITY * (0.10 + 0.90 * t) // baja pob casi invisible, alta pob full
+          fillOpacity: BASE_OPACITY * (0.10 + 0.90 * t)
         };
       }
 
@@ -235,7 +246,6 @@
 
       try { map.fitBounds(layer.getBounds(), { padding: [20, 20] }); } catch(e) {}
 
-      // Controles
       const baseMaps = { "Claro": baseLight, "Oscuro": baseDark };
       L.control.layers(baseMaps, overlays, { collapsed: false }).addTo(map);
 
