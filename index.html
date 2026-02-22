@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MVP Mapa - Accesibilidad + Población + EPV</title>
+  <title>MVP Mapa - Accesibilidad (Total/Diaria) + Población + EPV</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
@@ -35,13 +35,14 @@
     // =========================
     // CONFIG
     // =========================
-    const ACCESS_URL = "./data/hex_index_access.geojson";
-    const POP_URL    = "./data/hex_index_pop.geojson";
-    const EPV_URL    = "./data/EPV.geojson"; // <-- CAMBIAR si tu archivo se llama distinto
+    const ACCESS_URL       = "./data/hex_index_access.geojson";        // accesibilidad TOTAL
+    const ACCESS_DAILY_URL = "./data/hex_index_access_daily.geojson";  // <-- CAMBIAR si tu archivo se llama distinto
+    const POP_URL          = "./data/hex_index_pop.geojson";
+    const EPV_URL          = "./data/EPV.geojson"; // <-- CAMBIAR si tu archivo se llama distinto
 
     // Join entre access y pop
     const JOIN_KEY  = "id";
-    const ACC_FIELD = "acc_index";
+    const ACC_FIELD = "acc_index"; // mismo field para total/diaria (si en la diaria se llama distinto, decime y lo ajusto)
     const POP_FIELD = "pop_hex";
 
     // EPV
@@ -120,12 +121,33 @@
       "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"
     ];
 
-    // Leyenda acc_index cuantiles
-    function addLegend(breaks) {
+    // =========================
+    // Leyenda dinámica
+    // =========================
+    function buildLegendControl() {
       const legend = L.control({ position: "bottomright" });
+      legend._breaks = null;
+      legend._title = "";
+
       legend.onAdd = function() {
-        const div = L.DomUtil.create("div", "legend");
-        div.innerHTML = `<div class="title">${ACC_FIELD} (cuantiles) + intensidad por ${POP_FIELD}</div>`;
+        this._div = L.DomUtil.create("div", "legend");
+        this.render();
+        return this._div;
+      };
+
+      legend.set = function({ title, breaks }) {
+        this._title = title;
+        this._breaks = breaks;
+        this.render();
+      };
+
+      legend.render = function() {
+        if (!this._div) return;
+
+        const breaks = this._breaks || [];
+        const title  = this._title || `${ACC_FIELD} (cuantiles) + intensidad por ${POP_FIELD}`;
+
+        let html = `<div class="title">${title}</div>`;
         let prev = null;
 
         for (let i = 0; i < colors.length; i++) {
@@ -134,73 +156,42 @@
             ? `> ${formatNum(prev)}`
             : (prev == null ? `≤ ${formatNum(to)}` : `${formatNum(prev)} – ${formatNum(to)}`);
 
-          div.innerHTML += `
+          html += `
             <div class="row">
               <span class="swatch" style="background:${colors[i]}"></span>
               <span>${label}</span>
             </div>`;
           prev = to;
         }
-        div.innerHTML += `<div class="muted">10 clases. Población modula saturación/opacidad.</div>`;
-        return div;
+
+        html += `<div class="muted">10 clases. Población modula saturación/opacidad.</div>`;
+        this._div.innerHTML = html;
       };
-      legend.addTo(map);
+
       return legend;
     }
+
+    const legend = buildLegendControl().addTo(map);
 
     // =========================
     // Render
     // =========================
     const overlays = {};
+    let layerAccPopTotal = null;
+    let layerAccPopDaily = null;
 
-    Promise.all([
-      fetch(ACCESS_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${ACCESS_URL}`); return r.json(); }),
-      fetch(POP_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${POP_URL}`); return r.json(); }),
-      fetch(EPV_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${EPV_URL}`); return r.json(); }),
-    ])
-    .then(([accData, popData, epvData]) => {
-
-      // ---- 1) Población por id
-      const popById = new Map();
-      const popVals = [];
-
-      for (const f of popData.features || []) {
-        const id = f?.properties?.[JOIN_KEY];
-        const p  = toNumber(f?.properties?.[POP_FIELD]);
-        if (id == null) continue;
-        if (!Number.isNaN(p)) {
-          popById.set(String(id), p);
-          popVals.push(p);
-        }
-      }
-      if (!popVals.length) throw new Error(`No encontré población numérica en properties.${POP_FIELD}`);
-
-      // ---- 2) Cuantiles de acc_index
+    // helper: crea capa combinada con breaks propios
+    function buildAccPopLayer(accData, popById, popToT, label) {
+      // breaks cuantiles para este accData
       const accVals = [];
       for (const f of accData.features || []) {
         const v = toNumber(f?.properties?.[ACC_FIELD]);
         if (!Number.isNaN(v)) accVals.push(v);
       }
-      if (!accVals.length) throw new Error(`No encontré valores numéricos en properties.${ACC_FIELD}`);
+      if (!accVals.length) throw new Error(`No encontré valores numéricos en properties.${ACC_FIELD} para: ${label}`);
 
       const accBreaks = quantileBreaks(accVals, 10);
 
-      // ---- 3) Escala población -> t (0..1) con p10..p90 + log
-      popVals.sort((a,b)=>a-b);
-      const p10 = popVals[Math.floor(popVals.length * 0.10)];
-      const p90 = popVals[Math.floor(popVals.length * 0.90)];
-
-      function popToT(p) {
-        if (p == null || Number.isNaN(p)) return 0;
-        const lp  = Math.log1p(p);
-        const l10 = Math.log1p(p10);
-        const l90 = Math.log1p(p90);
-        let t = (lp - l10) / (l90 - l10);
-        t = Math.max(0, Math.min(1, t));
-        return Math.pow(t, GAMMA);
-      }
-
-      // ---- 4) Capa combinada (acc * población)
       function styleCombined(feature) {
         const id  = String(feature?.properties?.[JOIN_KEY] ?? "");
         const acc = toNumber(feature?.properties?.[ACC_FIELD]);
@@ -221,10 +212,77 @@
         };
       }
 
-      const layerAccPop = L.geoJSON(accData, { style: styleCombined }).addTo(map);
-      overlays["Acc+Pob (modulado)"] = layerAccPop;
+      const layer = L.geoJSON(accData, {
+        style: styleCombined,
+        onEachFeature: (feature, layer) => {
+          const id  = String(feature?.properties?.[JOIN_KEY] ?? "—");
+          const acc = toNumber(feature?.properties?.[ACC_FIELD]);
+          const pop = popById.get(String(feature?.properties?.[JOIN_KEY] ?? ""));
+          layer.bindTooltip(
+            `<b>${label}</b><br/>id: ${id}<br/>${ACC_FIELD}: ${formatNum(acc)}<br/>${POP_FIELD}: ${formatNum(pop)}`,
+            { sticky: true }
+          );
+        }
+      });
 
-      // ---- 5) EPV por grado de calidad (subcapas)
+      return { layer, breaks: accBreaks };
+    }
+
+    Promise.all([
+      fetch(ACCESS_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${ACCESS_URL}`); return r.json(); }),
+      fetch(ACCESS_DAILY_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${ACCESS_DAILY_URL}`); return r.json(); }),
+      fetch(POP_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${POP_URL}`); return r.json(); }),
+      fetch(EPV_URL).then(r => { if(!r.ok) throw new Error(`HTTP ${r.status} ${EPV_URL}`); return r.json(); }),
+    ])
+    .then(([accTotalData, accDailyData, popData, epvData]) => {
+
+      // ---- 1) Población por id
+      const popById = new Map();
+      const popVals = [];
+
+      for (const f of popData.features || []) {
+        const id = f?.properties?.[JOIN_KEY];
+        const p  = toNumber(f?.properties?.[POP_FIELD]);
+        if (id == null) continue;
+        if (!Number.isNaN(p)) {
+          popById.set(String(id), p);
+          popVals.push(p);
+        }
+      }
+      if (!popVals.length) throw new Error(`No encontré población numérica en properties.${POP_FIELD}`);
+
+      // ---- 2) Escala población -> t (0..1) con p10..p90 + log
+      popVals.sort((a,b)=>a-b);
+      const p10 = popVals[Math.floor(popVals.length * 0.10)];
+      const p90 = popVals[Math.floor(popVals.length * 0.90)];
+
+      function popToT(p) {
+        if (p == null || Number.isNaN(p)) return 0;
+        const lp  = Math.log1p(p);
+        const l10 = Math.log1p(p10);
+        const l90 = Math.log1p(p90);
+        let t = (lp - l10) / (l90 - l10);
+        t = Math.max(0, Math.min(1, t));
+        return Math.pow(t, GAMMA);
+      }
+
+      // ---- 3) Capas combinadas (Total y Diaria)
+      const totalBuilt = buildAccPopLayer(accTotalData, popById, popToT, "Accesibilidad TOTAL");
+      const dailyBuilt = buildAccPopLayer(accDailyData, popById, popToT, "Accesibilidad DIARIA");
+
+      layerAccPopTotal = totalBuilt.layer.addTo(map); // por defecto prendida
+      layerAccPopDaily = dailyBuilt.layer;            // por defecto apagada
+
+      overlays["Acc+Pob (TOTAL)"]  = layerAccPopTotal;
+      overlays["Acc+Pob (DIARIA)"] = layerAccPopDaily;
+
+      // leyenda inicial (TOTAL)
+      legend.set({
+        title: `${ACC_FIELD} (TOTAL, cuantiles) + intensidad por ${POP_FIELD}`,
+        breaks: totalBuilt.breaks
+      });
+
+      // ---- 4) EPV por grado de calidad (subcapas)
       const gradesSet = new Set();
       for (const f of epvData.features || []) {
         const g = f?.properties?.[EPV_GRADE_FIELD];
@@ -232,7 +290,6 @@
       }
       const grades = Array.from(gradesSet).sort((a,b) => a.localeCompare(b, "es"));
 
-      // estilos EPV
       function epvStyle() {
         return { weight: 1.2, opacity: 0.9, fillOpacity: 0.10 };
       }
@@ -240,25 +297,55 @@
         return L.circleMarker(latlng, { radius: 5, weight: 1.5, opacity: 0.9, fillOpacity: 0.65 });
       }
 
-      // crea una capa por grade
       for (const grade of grades) {
         const sub = L.geoJSON(epvData, {
           filter: (feature) => String(feature?.properties?.[EPV_GRADE_FIELD] ?? "Sin dato") === grade,
           style: epvStyle,
           pointToLayer: epvPointToLayer,
         });
-        overlays[`EPV: ${grade}`] = sub; // aparece como toggles en el control
-        // (no las agrego por defecto para que no ensucie; si querés que una venga on, la .addTo(map))
+        overlays[`EPV: ${grade}`] = sub;
       }
 
-      // ---- Controles
+      // ---- 5) Controles
       const baseMaps = { "Claro": baseLight, "Oscuro": baseDark };
-      L.control.layers(baseMaps, overlays, { collapsed: false }).addTo(map);
+      const layersControl = L.control.layers(baseMaps, overlays, { collapsed: false }).addTo(map);
 
-      addLegend(accBreaks);
+      // ---- 6) Exclusividad TOTAL vs DIARIA + leyenda que sigue la capa activa
+      map.on("overlayadd", (e) => {
+        if (e.layer === layerAccPopTotal) {
+          if (map.hasLayer(layerAccPopDaily)) map.removeLayer(layerAccPopDaily);
+          legend.set({
+            title: `${ACC_FIELD} (TOTAL, cuantiles) + intensidad por ${POP_FIELD}`,
+            breaks: totalBuilt.breaks
+          });
+        }
+        if (e.layer === layerAccPopDaily) {
+          if (map.hasLayer(layerAccPopTotal)) map.removeLayer(layerAccPopTotal);
+          legend.set({
+            title: `${ACC_FIELD} (DIARIA, cuantiles) + intensidad por ${POP_FIELD}`,
+            breaks: dailyBuilt.breaks
+          });
+        }
+      });
 
-      // encuadre
-      try { map.fitBounds(layerAccPop.getBounds(), { padding: [20, 20] }); } catch(e) {}
+      // Si apagan una capa y queda la otra prendida, mantengo la leyenda consistente
+      map.on("overlayremove", (e) => {
+        if (e.layer === layerAccPopTotal && map.hasLayer(layerAccPopDaily)) {
+          legend.set({
+            title: `${ACC_FIELD} (DIARIA, cuantiles) + intensidad por ${POP_FIELD}`,
+            breaks: dailyBuilt.breaks
+          });
+        }
+        if (e.layer === layerAccPopDaily && map.hasLayer(layerAccPopTotal)) {
+          legend.set({
+            title: `${ACC_FIELD} (TOTAL, cuantiles) + intensidad por ${POP_FIELD}`,
+            breaks: totalBuilt.breaks
+          });
+        }
+      });
+
+      // ---- 7) Encuadre
+      try { map.fitBounds(layerAccPopTotal.getBounds(), { padding: [20, 20] }); } catch(e) {}
 
     })
     .catch(err => {
@@ -268,4 +355,3 @@
   </script>
 </body>
 </html>
-
